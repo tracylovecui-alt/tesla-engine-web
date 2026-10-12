@@ -8,7 +8,7 @@
   <title>DriveTone · 虚拟引擎</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23101214'/%3E%3Cpath d='M12 40L24 24h16l12 16M20 40h24' fill='none' stroke='%23ff804f' stroke-width='6'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="./style.css">
-  <script src="./app.js?v=1.1" defer></script>
+  <script src="./app.js?v=1.2" defer></script>
 </head>
 <body>
   <main class="shell">
@@ -39,8 +39,8 @@
 
       <aside class="controls">
         <section class="control-card"><div class="section-title"><h2>选择声浪</h2><span>03 PROFILES</span></div><div class="profiles" role="group" aria-label="引擎音色">
-          <button class="profile selected" data-profile="muscle" aria-pressed="true"><span class="profile-icon">V8</span><span><strong>Muscle V8</strong><small>低沉脉冲 · 美式肌肉</small></span><span class="profile-check">↗</span></button>
-          <button class="profile" data-profile="sport" aria-pressed="false"><span class="profile-icon">V10</span><span><strong>Sport V10</strong><small>高转轰鸣 · 跑车风格</small></span><span class="profile-check">↗</span></button>
+          <button class="profile selected" data-profile="muscle" aria-pressed="true"><span class="profile-icon">V8</span><span><strong>Muscle V8</strong><small>录音循环 · 低沉排气</small></span><span class="profile-check">↗</span></button>
+          <button class="profile" data-profile="sport" aria-pressed="false"><span class="profile-icon">V10</span><span><strong>Sport V10</strong><small>录音循环 · 高转轰鸣</small></span><span class="profile-check">↗</span></button>
           <button class="profile" data-profile="future" aria-pressed="false"><span class="profile-icon">EV</span><span><strong>Future Drive</strong><small>电子涡轮 · 连续加速</small></span><span class="profile-check">↗</span></button>
         </div></section>
 
@@ -52,7 +52,7 @@
         <section class="control-card mix-card"><div class="section-title"><h2>声音调节</h2><span>LOCAL SYNTH</span></div><div class="range-heading"><label for="volume">音量</label><output id="volume-value">35%</output></div><input id="volume" type="range" min="0" max="100" value="35"><div class="range-heading intensity-heading"><label for="intensity">力度</label><output id="intensity-value">55%</output></div><input id="intensity" type="range" min="0" max="100" value="55"><label class="switch-row"><span>换挡声效</span><input id="shift-sound" type="checkbox" checked><span class="switch" aria-hidden="true"></span></label><button id="wake-lock" class="wake-button" aria-pressed="false">保持屏幕常亮 <span>↗</span></button></section>
       </aside>
     </div>
-    <footer class="page-footer"><span>DRIVETONE / BROWSER ENGINE</span><span>请在停车时操作 · 使用车内扬声器播放</span><span id="version">v1.1</span></footer>
+    <footer class="page-footer"><span>DRIVETONE / BROWSER ENGINE</span><span>请在停车时操作 · 使用车内扬声器播放</span><span id="version">v1.2</span></footer><p style="text-align:center;font-size:10px"><a href="./audio/NOTICE.md" style="color:#919796">音频来源与许可</a></p>
   </main>
   <noscript>需要启用 JavaScript 才能运行虚拟引擎。</noscript>
 </body>

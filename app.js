@@ -1,4 +1,4 @@
-/* Original browser synthesizer. No vehicle API or third-party audio assets. */
+/* Original browser synthesizer. No vehicle API. Sample credits and licenses: audio/NOTICE.md. */
 (() => {
   'use strict';
   const $ = id => document.getElementById(id);
@@ -16,7 +16,7 @@
   let watchId = null, anchor = null, gpsRaw = null, gpsFiltered = 0, gpsAcceleration = 0;
   let gpsReceived = null, gpsAccuracy = null, gpsState = 'off', gpsRejects = 0;
   let audio = null, wakeLock = null, wakeWanted = false, audioRecovery = false;
-  let runGeneration = 0;
+  let runGeneration = 0, sampleBuffers = null;
   const notice = message => { $('notice').textContent = message; };
 
   function loadSettings() {
@@ -31,6 +31,33 @@
   }
   function saveSettings() {
     try { localStorage.setItem('drivetone-settings', JSON.stringify({ profile: selected, volume, intensity, shift: shiftsEnabled })); } catch (_) {}
+  }
+
+  async function loadSamples(context) {
+    if (sampleBuffers) return;
+    const entries = await Promise.all(['muscle', 'sport'].map(async id => {
+      const response = await fetch(id === 'muscle' ? './audio/v8.wav' : './audio/v10.wav');
+      if (!response.ok) throw new Error('sample-load');
+      const decoded = await context.decodeAudioData(await response.arrayBuffer());
+      const overlap = Math.min(Math.round(decoded.sampleRate * 0.025), Math.floor(decoded.length / 8));
+      const buffer = context.createBuffer(decoded.numberOfChannels, decoded.length - overlap, decoded.sampleRate);
+      let peak = 0;
+      for (let ch = 0; ch < decoded.numberOfChannels; ch++) {
+        const input = decoded.getChannelData(ch), output = buffer.getChannelData(ch);
+        output.set(input.subarray(overlap));
+        for (let i = 0; i < overlap; i++) {
+          const x = i / overlap;
+          output[output.length - overlap + i] = input[input.length - overlap + i] * (1 - x) + input[i] * x;
+        }
+        for (const x of output) peak = Math.max(peak, Math.abs(x));
+      }
+      for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+        const data = buffer.getChannelData(ch);
+        for (let i = 0; i < data.length; i++) data[i] *= 0.7 / Math.max(peak, 0.01);
+      }
+      return [id, buffer];
+    }));
+    sampleBuffers = Object.fromEntries(entries);
   }
 
   class Synth {
@@ -85,7 +112,7 @@
       for (const voice of this.voices) {
         voice.gain.gain.cancelScheduledValues(t); voice.gain.gain.setTargetAtTime(0, t, 0.025);
         voice.osc.stop(t + 0.2);
-        voice.osc.onended = () => { voice.osc.disconnect(); voice.gain.disconnect(); };
+        voice.osc.onended = () => { voice.osc.disconnect(); voice.gain.disconnect(); if (voice.filter) voice.filter.disconnect(); };
       }
       if (this.noiseSource) {
         const source = this.noiseSource, filter = this.noiseFilter, gain = this.noiseGain;
@@ -96,7 +123,7 @@
       const banks = id === 'muscle' ? [[0, 90, 270, 540], [180, 360, 450, 630]] :
         [[0, 144, 288, 432, 576], [72, 216, 360, 504, 648]];
       const specs = id === 'future' ? [[1, 0.36, 'sine'], [2.01, 0.16, 'sine'], [4.005, 0.06, 'sine']] :
-        [[1, 0.34, 'bank'], [1, 0.30, 'bank'], [2, 0.08, 'sine'], [profiles[id].cylinders, 0.05, 'triangle']];
+        [[1, 0.035, 'bank'], [1, 0.03, 'bank'], [2, 0.025, 'sine']];
       this.body.frequency.setTargetAtTime(id === 'muscle' ? 115 : 210, t, 0.1);
       this.body.gain.setTargetAtTime(id === 'muscle' ? 4 : 2, t, 0.1);
       for (const [index, [ratio, level, type]] of specs.entries()) {
@@ -106,6 +133,17 @@
         gain.gain.value = 0; osc.frequency.value = 50;
         osc.connect(gain); gain.connect(id === 'future' ? this.bus : this.drive); osc.start(t);
         this.voices.push({ osc, gain, ratio, level, bank: type === 'bank' });
+      }
+      if (id !== 'future' && sampleBuffers) {
+        // Two load treatments of one recording, not independently recorded on/off layers.
+        for (const load of ['on', 'off']) {
+          const osc = this.context.createBufferSource(), gain = this.context.createGain(), filter = this.context.createBiquadFilter();
+          osc.buffer = sampleBuffers[id]; osc.loop = true; gain.gain.value = 0;
+          filter.type = 'lowpass'; filter.Q.value = 0.65;
+          osc.connect(filter); filter.connect(gain); gain.connect(this.bus);
+          osc.start(t);
+          this.voices.push({ osc, gain, filter, sample: true, load, reference: id === 'muscle' ? 3000 : 5000 });
+        }
       }
       this.noiseSource = this.context.createBufferSource(); this.noiseSource.buffer = this.noise; this.noiseSource.loop = true;
       this.noiseGain = this.context.createGain(); this.noiseGain.gain.value = 0;
@@ -119,6 +157,14 @@
       const base = selected === 'future' ? 65 + state.rpm * 0.025 : state.rpm / 120;
       const flutter = 1 + (Math.sin(t * 11.3) * 0.005 + Math.sin(t * 17.9) * 0.003) * (1 - relative) ** 2;
       for (const v of this.voices) {
+        if (v.sample) {
+          const power = load * load * (3 - 2 * load);
+          const weight = v.load === 'on' ? Math.sin(power * Math.PI / 2) : Math.cos(power * Math.PI / 2);
+          v.osc.playbackRate.setTargetAtTime(clamp(state.rpm / v.reference, 0.2, 3), t, 0.045);
+          v.gain.gain.setTargetAtTime(weight * (v.load === 'on' ? 0.8 : 0.48) * (state.shifting ? 0.25 : 1), t, 0.05);
+          v.filter.frequency.setTargetAtTime(v.load === 'on' ? 1600 + relative * 6000 + force * load * 4000 : 650 + relative * 3200, t, 0.07);
+          continue;
+        }
         v.osc.frequency.setTargetAtTime(base * v.ratio * flutter, t, 0.035);
         v.gain.gain.setTargetAtTime(v.level * (0.38 + load * 0.5 + relative * 0.12) * (v.bank ? 1 + Math.sin(t * 9.7) * 0.055 * (1 - relative) : 1) * (state.shifting ? 0.32 : 1), t, 0.04);
       }
@@ -225,14 +271,14 @@
       if (!audio) {
         let context;
         try { context = new Ctx({ latencyHint: 'interactive' }); } catch (_) { context = new Ctx(); }
-        await context.resume(); audio = new Synth(context);
+        await context.resume(); notice('正在加载发动机采样…'); await loadSamples(context); audio = new Synth(context);
         context.onstatechange = () => { if (running && context.state !== 'running') { audioRecovery = true; notice('音频已暂停，请点击恢复声音。'); } };
       } else await audio.context.resume();
       if (audio.context.state !== 'running') throw new Error('audio-suspended');
       audioRecovery = false; running = true; runGeneration++; resetPowertrain(); lastFrame = performance.now();
       if (mode === 'gps') startGps(); else notice('演示模式 · 拖动车速或开启自动巡航');
       if (wakeWanted) await acquireWake();
-    } catch (_) { running = false; notice('声音未能启动，请再次点击；车机可能限制网页音频。'); }
+    } catch (_) { running = false; notice('声音未能启动，请检查网络后重试；音频采样需要下载，车机也可能限制音频。'); }
     finally { starting = false; $('start').disabled = false; paint(performance.now()); }
   }
 
