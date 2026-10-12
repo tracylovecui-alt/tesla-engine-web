@@ -42,9 +42,17 @@
       this.limiter = context.createDynamicsCompressor();
       this.limiter.threshold.value = -12; this.limiter.knee.value = 8; this.limiter.ratio.value = 8;
       this.limiter.attack.value = 0.005; this.limiter.release.value = 0.15;
+      // Exhaust saturation and a fixed body resonance sit below the moving intake filter.
+      this.drive = context.createGain(); this.drive.gain.value = 1;
+      this.saturation = context.createWaveShaper();
+      this.saturation.curve = Float32Array.from({ length: 2048 }, (_, i) => Math.tanh((i / 2047 * 2 - 1) * 1.8) / Math.tanh(1.8));
+      this.saturation.oversample = '2x';
+      this.body = context.createBiquadFilter(); this.body.type = 'peaking'; this.body.Q.value = 0.8;
+      this.highpass = context.createBiquadFilter(); this.highpass.type = 'highpass'; this.highpass.frequency.value = 28;
       this.filter = context.createBiquadFilter(); this.filter.type = 'lowpass'; this.filter.Q.value = 0.65;
       this.bus = context.createGain(); this.bus.gain.value = 0.6;
-      this.bus.connect(this.filter); this.filter.connect(this.limiter); this.limiter.connect(this.master); this.master.connect(context.destination);
+      this.drive.connect(this.saturation); this.saturation.connect(this.body); this.body.connect(this.bus);
+      this.bus.connect(this.highpass); this.highpass.connect(this.filter); this.filter.connect(this.limiter); this.limiter.connect(this.master); this.master.connect(context.destination);
       const buffer = context.createBuffer(1, context.sampleRate * 2, context.sampleRate);
       const data = buffer.getChannelData(0);
       let previous = 0;
@@ -52,48 +60,89 @@
       this.noise = buffer;
       this.setProfile(selected);
     }
+    exhaustWave(events, sharpness) {
+      // One 720-degree cycle: uneven V8 bank firing gives the low idle burble.
+      const samples = 512, harmonics = 64, pulse = new Float32Array(samples);
+      for (let i = 0; i < samples; i++) {
+        for (let j = 0; j < events.length; j++) {
+          const phase = (i / samples - events[j] / 720 + 1) % 1;
+          pulse[i] += Math.exp(-phase * sharpness) * (1 - Math.exp(-phase * 650)) *
+            (1 + 0.3 * Math.cos(phase * 110)) * (1 + (j % 3 - 1) * 0.06);
+        }
+      }
+      const real = new Float32Array(harmonics + 1), imag = new Float32Array(harmonics + 1);
+      for (let h = 1; h <= harmonics; h++) {
+        for (let i = 0; i < samples; i++) {
+          const angle = 2 * Math.PI * h * i / samples;
+          real[h] += pulse[i] * Math.cos(angle) * 2 / samples;
+          imag[h] += pulse[i] * Math.sin(angle) * 2 / samples;
+        }
+      }
+      return this.context.createPeriodicWave(real, imag);
+    }
     setProfile(id) {
       const t = this.context.currentTime;
-      for (const voice of this.voices) { voice.gain.gain.cancelScheduledValues(t); voice.gain.gain.setTargetAtTime(0, t, 0.025); voice.osc.stop(t + 0.2); }
-      if (this.noiseSource) this.noiseSource.stop(t + 0.2);
+      for (const voice of this.voices) {
+        voice.gain.gain.cancelScheduledValues(t); voice.gain.gain.setTargetAtTime(0, t, 0.025);
+        voice.osc.stop(t + 0.2);
+        voice.osc.onended = () => { voice.osc.disconnect(); voice.gain.disconnect(); };
+      }
+      if (this.noiseSource) {
+        const source = this.noiseSource, filter = this.noiseFilter, gain = this.noiseGain;
+        gain.gain.cancelScheduledValues(t); gain.gain.setTargetAtTime(0, t, 0.025);
+        source.stop(t + 0.2); source.onended = () => { source.disconnect(); filter.disconnect(); gain.disconnect(); };
+      }
       this.voices = [];
-      const wave = this.context.createPeriodicWave(new Float32Array([0, 0, 0, 0, 0, 0, 0, 0, 0]), new Float32Array(id === 'muscle' ? [0, 1, 0.6, 0.36, 0.18, 0.13, 0.09, 0.06, 0.04] : [0, 1, 0.4, 0.25, 0.16, 0.12, 0.08, 0.05, 0.03]));
-      const specs = id === 'future' ? [[1, 0.36, 'sine'], [2.01, 0.16, 'sine'], [4.005, 0.06, 'sine']] : [[1, 0.38, 'custom'], [0.5, 0.22, 'sine'], [2.003, 0.07, 'sawtooth']];
-      for (const [ratio, level, type] of specs) {
+      const banks = id === 'muscle' ? [[0, 90, 270, 540], [180, 360, 450, 630]] :
+        [[0, 144, 288, 432, 576], [72, 216, 360, 504, 648]];
+      const specs = id === 'future' ? [[1, 0.36, 'sine'], [2.01, 0.16, 'sine'], [4.005, 0.06, 'sine']] :
+        [[1, 0.34, 'bank'], [1, 0.30, 'bank'], [2, 0.08, 'sine'], [profiles[id].cylinders, 0.05, 'triangle']];
+      this.body.frequency.setTargetAtTime(id === 'muscle' ? 115 : 210, t, 0.1);
+      this.body.gain.setTargetAtTime(id === 'muscle' ? 4 : 2, t, 0.1);
+      for (const [index, [ratio, level, type]] of specs.entries()) {
         const osc = this.context.createOscillator(), gain = this.context.createGain();
-        if (type === 'custom') osc.setPeriodicWave(wave); else osc.type = type;
+        if (type === 'bank') osc.setPeriodicWave(this.exhaustWave(banks[index], id === 'muscle' ? 48 : 75));
+        else osc.type = type;
         gain.gain.value = 0; osc.frequency.value = 50;
-        osc.connect(gain); gain.connect(this.bus); osc.start();
-        this.voices.push({ osc, gain, ratio, level });
+        osc.connect(gain); gain.connect(id === 'future' ? this.bus : this.drive); osc.start(t);
+        this.voices.push({ osc, gain, ratio, level, bank: type === 'bank' });
       }
       this.noiseSource = this.context.createBufferSource(); this.noiseSource.buffer = this.noise; this.noiseSource.loop = true;
       this.noiseGain = this.context.createGain(); this.noiseGain.gain.value = 0;
-      this.noiseFilter = this.context.createBiquadFilter(); this.noiseFilter.type = 'bandpass'; this.noiseFilter.frequency.value = 550; this.noiseFilter.Q.value = 0.8;
-      this.noiseSource.connect(this.noiseFilter); this.noiseFilter.connect(this.noiseGain); this.noiseGain.connect(this.bus); this.noiseSource.start();
+      this.noiseFilter = this.context.createBiquadFilter(); this.noiseFilter.type = 'bandpass'; this.noiseFilter.frequency.value = 550; this.noiseFilter.Q.value = 0.7;
+      this.noiseSource.connect(this.noiseFilter); this.noiseFilter.connect(this.noiseGain); this.noiseGain.connect(this.bus); this.noiseSource.start(t);
     }
     update(state) {
       const t = this.context.currentTime, p = profiles[selected];
       const relative = clamp((state.rpm - p.idle) / (p.redline - p.idle), 0, 1);
       const force = intensity / 100, load = state.throttle;
-      const base = selected === 'future' ? 65 + state.rpm * 0.025 : state.rpm / 60 * p.cylinders / 2;
-      const flutter = 1 + Math.sin(t * 7) * 0.004 + (selected === 'muscle' ? Math.sin(t * 13) * 0.009 * (1 - relative) : 0);
+      const base = selected === 'future' ? 65 + state.rpm * 0.025 : state.rpm / 120;
+      const flutter = 1 + (Math.sin(t * 11.3) * 0.005 + Math.sin(t * 17.9) * 0.003) * (1 - relative) ** 2;
       for (const v of this.voices) {
         v.osc.frequency.setTargetAtTime(base * v.ratio * flutter, t, 0.035);
-        v.gain.gain.setTargetAtTime(v.level * (0.45 + load * 0.45 + relative * 0.2) * (state.shifting ? 0.55 : 1), t, 0.04);
+        v.gain.gain.setTargetAtTime(v.level * (0.38 + load * 0.5 + relative * 0.12) * (v.bank ? 1 + Math.sin(t * 9.7) * 0.055 * (1 - relative) : 1) * (state.shifting ? 0.32 : 1), t, 0.04);
       }
-      this.noiseGain.gain.setTargetAtTime(selected === 'future' ? 0.07 + load * 0.05 : (0.035 + load * force * 0.22 + relative * 0.06), t, 0.06);
-      this.noiseFilter.frequency.setTargetAtTime(350 + relative * 2400, t, 0.08);
-      this.filter.frequency.setTargetAtTime(selected === 'future' ? 1800 + relative * 5000 : 500 + relative * 2400 + load * force * 3600, t, 0.08);
+      this.noiseGain.gain.setTargetAtTime(selected === 'future' ? 0.07 + load * 0.05 : (0.015 + load * force * 0.11 + relative * 0.025) * (state.shifting ? 0.3 : 1), t, 0.06);
+      this.noiseFilter.frequency.setTargetAtTime(500 + relative * 1800 + load * 700, t, 0.08);
+      this.filter.frequency.setTargetAtTime(selected === 'future' ? 1800 + relative * 5000 : 420 + relative * 2100 + load * (700 + force * 2100), t, 0.08);
+      this.drive.gain.setTargetAtTime(0.8 + load * (0.5 + force * 0.8), t, 0.06);
       const target = running && document.visibilityState === 'visible' && !audioRecovery ? Math.pow(volume / 100, 1.6) * 0.65 : 0;
       this.master.gain.setTargetAtTime(target, t, 0.07);
     }
     shift() {
       if (!shiftsEnabled || !running || selected === 'future') return;
       const t = this.context.currentTime, src = this.context.createBufferSource(), gain = this.context.createGain();
-      const filter = this.context.createBiquadFilter(); filter.type = 'lowpass'; filter.frequency.value = 1200;
-      src.buffer = this.noise; gain.gain.setValueAtTime(0.2 * intensity / 100, t); gain.gain.exponentialRampToValueAtTime(0.001, t + 0.13);
+      const filter = this.context.createBiquadFilter(); filter.type = 'lowpass'; filter.frequency.value = 650;
+      src.buffer = this.noise; gain.gain.setValueAtTime(0.07 * intensity / 100, t); gain.gain.exponentialRampToValueAtTime(0.001, t + 0.13);
       src.connect(filter); filter.connect(gain); gain.connect(this.limiter); src.start(); src.stop(t + 0.15);
       src.onended = () => { src.disconnect(); filter.disconnect(); gain.disconnect(); };
+      const knock = this.context.createOscillator(), envelope = this.context.createGain();
+      knock.frequency.setValueAtTime(selected === 'muscle' ? 120 : 180, t);
+      knock.frequency.exponentialRampToValueAtTime(45, t + 0.09);
+      envelope.gain.setValueAtTime(0, t); envelope.gain.linearRampToValueAtTime(0.1 * intensity / 100, t + 0.006);
+      envelope.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
+      knock.connect(envelope); envelope.connect(this.limiter); knock.start(t); knock.stop(t + 0.12);
+      knock.onended = () => { knock.disconnect(); envelope.disconnect(); };
     }
     mute() { this.master.gain.setTargetAtTime(0, this.context.currentTime, 0.04); }
   }
